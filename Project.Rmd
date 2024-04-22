@@ -1,0 +1,855 @@
+---
+title: "Time_Series_Project"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction 
+
+Air travel, while convenient, usually faces with unforeseen challenges. Weather, mechanical failures, and labor disputes can lead to delays or cancellations, while luggage can be lost, damaged, or stolen. As baggage fees become more common, airlines face increased pressure to handle luggage carefully. Mishandled baggage damages customer trust and can be costly for airlines, necessitating compensation and the logistical effort of returning lost items.
+
+# Dataset 
+```{r Data}
+setwd("~/Desktop/MSDS/Term3_Spring2024/TimeSeries/Project/data/")
+data<-read.csv("baggagecomplaints.csv", header = T)
+head(data)
+```
+Airlines submit data on delays, cancellations, overbo, baggage issues, and more to the U.S. government, which makes this information available to the public.Our dataset includes monthly data from 2004 to 2010 for United Airlines, American Eagle, and Hawaiian Airlines, covering:
+
++ Baggage - Monthly passenger complaints about stolen items, or lost, damaged, or incorrectly routed baggage.
+
++ Scheduled - The total flights an airline scheduled in that month.
+
++ Cancelled - How many flights were cancelled by the airline in that month.
+
++ Enplaned - The number of passengers that flew with the airline in that month.
+
+We aim to deploy a combination of univariate and multivariate models to forecast the United Airlines' baggage complaint volumes over the next six months and extending to the next year.  We will also evaluate the model performance using these two horizons. 
+
+```{r United airline data}
+library(dplyr)
+library(tswge)
+un.df <- data %>% filter(Airline == "United")
+head(un.df)
+```
+The dataset includes the baggage complaints of three airlines: American Eagle, Hawaiian and United. We will analyze the records of the United Airlines. 
+
+# Visual Analysis 
+```{r Stationary or Nonstaitonary}
+plotts.wge(un.df$Baggage)
+plotts.sample.wge(un.df$Baggage)
+parzen.wge(un.df$Baggage, trunc = 80, dbcalc = T)
+acf(un.df$Baggage, lag.max = 83)
+```
+There are evidence of wandering behavior in the realization and the spectral density estimate with the peak at f = 0. The damped sinusoidal autocorrealtions suggests a cyclic behavior in the time series. We will check the if the time series is stationary using the Dickey Fuller test. 
+
+```{r Dickey-Fuller Test}
+library(tseries)
+adf.test(un.df$Baggage)
+```
+Based on the Dickey-Fuller test, there is not enough evidence to suggest that the United baggage complaint time series is stationary. Therefore we will remove the first difference to stationalize the time series.  
+
+
+```{r Overfitting AR models}
+arma9.1 = est.arma.wge(un.df$Baggage,p=10)
+arma9.1 = est.arma.wge(un.df$Baggage,p=14)
+arma9.1 = est.arma.wge(un.df$Baggage,p=18)
+factor.wge(phi = c(0,0,0,0,0,1))
+```
+Using the over fitting models, we noticed that they contained some of the unit factor of (1-B^6 which suggests a potential seasonal pattern at six-month intervals. This observation aligned with the trend of baggage complaints peaking during the summer and year-end, indicating the relevance of a semi-annual seasonality in our data. Thus, we decided to proceed with two candidate models for further investigation: one ARIMA model that does not account for seasonality, and another that incorporates a seasonal component to capture this six-month frequency.
+
+```{r Correlation matrix}
+library(GGally)
+ggpairs(un.df[,5:8])
+
+# Check for loags
+ccf(un.df$Baggage, un.df$Scheduled)
+ccf(un.df$Baggage, un.df$Cancelled)
+ccf(un.df$Baggage, un.df$Enplaned)
+```
+There are evidence to suggest the strong correlation between the predictors, including the amount of scheduled flights, the enplaned passengers and the canceled flights of a month to its number of baggage complaints. No lag is detected. This information will be useful for the multivariate models.
+
+```{r Realizations of the predictors}
+plotts.sample.wge(un.df$Scheduled)
+plotts.sample.wge(un.df$Cancelled)
+plotts.sample.wge(un.df$Enplaned)
+```
+The scheduled flights revealed characteristics such as slow dammping autocorrelations, a peak at zero in the spectral density estimate, and non-linear trends in its realization, suggesting the need for a non-stationary model. In contrast, the autocorrelations of cancelled flights and its spectral density estimates with a peak at 0.166 indicate potential seasonality. The pattern of autocorrelation peaks at lags 0, 12, and 24 for enplaned passengers points to a distinct seasonal rhythm with a 12-month frequency. These insights underline the importance of considering both seasonal and non-stationary elements in our multivariate modeling approach.
+
+We will proceed by exploring several non-stationary univariate candidate models before developing multivariate models, such as the Vector Autoregression (VAR) and the Multilayer Perceptron (MLP) models.
+
+#Model 1: ARIMA model - No seasonality 
+```{r Differenced Data}
+Diff1 = artrans.wge(un.df$Baggage, phi.tr=1)
+aic5.wge(Diff1, p=0:10, q=0:3, type='bic') # AIC chooses p=8, q=1
+arima8.1.1 = est.arma.wge(Diff1,p=8,q=1) # ARIMA(8.1.1)
+plotts.sample.wge(arima8.1.1$res, arlimits = TRUE)
+
+```
+
+After differencing the data to address nonstationarity, te differenced data appears stationary. We determined the parameters p and q as 8 and 1, respectively, using the BIC. The residuals from the ARMA(8,1) model of the differenced data suggest non-randomness, prompting us to further validate this with a Ljung-Box test and visual analysis.
+
+
+```{r Checking for white noise}
+acf(arima8.1.1$res)
+ljung.wge(arima8.1.1$res, p = 8, q = 1, K = 24)
+ljung.wge(arima8.1.1$res, p = 8, q = 1, K = 48)
+arima8.1.1$phi
+arima8.1.1$theta
+arima8.1.1$avar
+mean(un.df$Baggage)
+```
+As anticipated, the residuals from ARMa(9,1) of the differenced data failed the white noise tests, including both visual assessment and the Ljung-Box tests at K=24 and 48. This evidence suggests that further adjustments to the model may be necessary to adequately capture all underlying patterns in the data. 
+
+The final model of the ARIMA(8,1,1) is:
+
+(1-B)(1 + 1.4228277B + 0.8543794$B^2$ + 0.6289691$B^3$  + 0.5148767$B^4$ + 0.1615792$B^5$ -0.3094022$B^6$ -  0.5625855$B^6$ -   0.4015146$B^7$) ($X_t - 21599.76$) = $a_t$ with $\sigma^2 = 20703367$ 
+
+
+```{r Superimposed acfs and spectral density estimates}
+#Compaing spectral densitites 
+sims = 10
+SpecDen = parzen.wge(un.df$Baggage, plot = "FALSE")
+plot(SpecDen$freq,SpecDen$pzgram, type = "l", lwd = 6)
+
+for( i in 1: sims)
+{
+   SpecDen2 = parzen.wge(gen.arima.wge(length(un.df$Baggage), phi = arima8.1.1$phi, theta = arima8.1.1$theta, d = 1, plot ="FALSE"), plot = "FALSE")
+   lines(SpecDen2$freq,SpecDen2$pzgram, lwd = 2, col = "red")
+}
+
+
+#Compare ACFs
+sims = 10
+ACF = acf(un.df$Baggage, plot = "FALSE")
+plot(ACF$lag ,ACF$acf , type = "l", lwd = 6)
+
+for( i in 1: sims)
+{
+   ACF2 = acf(gen.arima.wge(length(un.df$Baggage), d = 1, phi = arima8.1.1$phi, theta = arima8.1.1$theta, plot = " FALSE"), plot = "FALSE")
+   lines(ACF2$lag ,ACF2$acf, lwd = 2, col = "red")
+}
+```
+We did not analyze the realizations generated by the ARIMA(8,1,1) model, as they would not align with the actual dynamics of the United Airlines baggage complaint time series. Furthermore, the superimposed autocorrelations and spectral density estimates derived from the model also did not correspond with observations from the original series. This mismatch provides additional evidence suggesting that the ARIMA(8,1,1) model may not be the most effective for forecasting the volume of baggage complaints of United Airline.
+
+```{r Forecast with ARIMA model - no seasonality}
+arima8.1.1.6mon.fore = fore.arima.wge(un.df$Baggage, d = 1, phi = arima8.1.1$phi, theta = arima8.1.1$theta, n.ahead = 6, lastn = T)
+arima8.1.1.6mon.ASE = mean((arima8.1.1.6mon.fore$f - un.df$Baggage[(length(un.df$Baggage)-5):length(un.df$Baggage)])^2)
+arima8.1.1.6mon.ASE
+arima8.1.1.1yr.fore = fore.arima.wge(un.df$Baggage, d =1, phi = arima8.1.1$phi, theta = arima8.1.1$theta, n.ahead = 12, lastn = T)
+arima8.1.1.1yr.ASE = mean((arima8.1.1.1yr.fore$f - un.df$Baggage[(length(un.df$Baggage)-11):length(un.df$Baggage)])^2)
+arima8.1.1.1yr.ASE
+```
+The forecasts for the last six months of baggage complaints did not effectively forecast the increase in complaints for October and November 2010, although the predictions for the other months were close to the observed values. However, when extending the forecast window to a year, the overestimation in October and November led to higher forecasted values for the subsequent months. 
+
++ The ASE of the ARIMA(8,1,1) model for the horizon of 6 month: 4,156,937
++ The ASE of the ARIMA(8,1,1) model for the horizon of 1 year:  14,502,103
+
+```{r ARIMA Rolling Window - no seasonality}
+roll.win.rmse.wge(un.df$Baggage, d =1,  phi = arima8.1.1$phi, theta = arima8.1.1$theta,horizon = 6)
+roll.win.rmse.wge(un.df$Baggage, d =1, phi = arima8.1.1$phi, theta = arima8.1.1$theta,horizon = 12)
+```
+The ARIMA(8,1,1) model produce an RMSE of 5585.017 for the six-month window and 7064.437 for 1-year window. 
+
+
+# Model 2: ARUMA - With seasonality 
+```{r Transformed Data - Removing the seasonality}
+dif1.6 = artrans.wge(Diff1, phi.tr = c(rep(0,5),1))
+plotts.sample.wge(dif1.6)
+aic5.wge(dif1.6, p = 0:10, q = 0:4)
+aic5.wge(dif1.6, p = 0:10, q = 0:4, type = "bic")
+```
+The second differenced dataset, d1.6 is a realization from the difference process $Y_t = (1-B)(1 - B^6)X_t$ It is noticed that the data is cyclic, the sample autocorrelations have a sinusoidal behaviors, and the spectral density has peak at about 0.05, 0.2, and 0.45. This bejavior is consitent with the factor table below of an ARMA(7,3). 
+
+
+```{r ARUMA - Estimating phi and theta}
+arima.7.1.6.3.est = est.arma.wge(dif1.6, p = 7, q = 3 )
+acf(arima.7.1.6.3.est $res)
+ljung.wge(arima.7.1.6.3.est $res, p = 7 , q = 3, K = 24)
+ljung.wge(arima.7.1.6.3.est $res, p = 7 , q = 3, K = 48)
+```
+The residuals of the dif7.3 after fitting the ARMA(7,3) "passed" the visual check as 95% of the lags are within the autocorrelation limits. There are also not enough evidence in the Ljung-Box test to suggest that the residuals are not white noise ( p = 0.419 and 0.867 for K = 24 and 48 respectively)
+
+
+```{r Superimposed spectral densities and acf}
+#Compaing spectral densitites 
+sims = 10
+SpecDen = parzen.wge(un.df$Baggage, plot = "FALSE")
+plot(SpecDen$freq,SpecDen$pzgram, type = "l", lwd = 6)
+
+for( i in 1: sims)
+{
+   SpecDen2 = parzen.wge(gen.aruma.wge(length(un.df$Baggage), phi = arima.7.1.6.3.est $phi,theta = arima.7.1.6.3.est $theta, d = 1, s = 6 , plot ="FALSE"), plot = "FALSE")
+   lines(SpecDen2$freq,SpecDen2$pzgram, lwd = 2, col = "red")
+}
+
+
+#Compare ACFs
+sims = 10
+ACF = acf(un.df$Baggage, plot = "FALSE")
+plot(ACF$lag ,ACF$acf , type = "l", lwd = 6)
+
+for( i in 1: sims)
+{
+   ACF2 = acf(gen.aruma.wge(length(un.df$Baggage), phi = arima.7.1.6.3.est $phi,theta = arima.7.1.6.3.est $theta, d = 1, s= 6, plot = " FALSE"), plot = "FALSE")
+   lines(ACF2$lag ,ACF2$acf, lwd = 2, col = "red")
+}
+```
+The ARIMA(7,1,3) model with a seasonalality of 6 effectively captures the low-frequency wandering behavior in the spectral density estimates but fails to account for higher frequency variations. Similarly, in the autocorrelation plots, this wandering behavior dominates, leading to a model-generated autocorrelation that slowly damps and misses the sinusoidal patterns present in the original data.
+
+
+``` {r ARUMA Forecasts }
+arima.7.1.6.3.6mon.fore = fore.arima.wge(un.df$Baggage, phi = arima.7.1.6.3.est $phi,theta = arima.7.1.6.3.est $theta, d = 1, s =6, n.ahead = 6, lastn = T )
+arima.7.1.6.3.6mon.ASE = mean((arima.7.1.6.3.6mon.fore$f - un.df$Baggage[(length(un.df$Baggage)-5):length(un.df$Baggage)])^2)
+arima.7.1.6.3.6mon.ASE
+arima.7.1.6.3.1yr.fore = fore.arima.wge(un.df$Baggage, phi = arima.7.1.6.3.est $phi,theta = arima.7.1.6.3.est $theta,d =1,  s =6, n.ahead = 12, lastn = T )
+arima.7.1.6.3.1yr.ASE = mean((arima.7.1.6.3.1yr.fore$f - un.df$Baggage[(length(un.df$Baggage)-11):length(un.df$Baggage)])^2)
+arima.7.1.6.3.1yr.ASE
+```
+While the forecasts for the last 6 months and the las year underestimate the number of baggage complaints, it eefectively forecasts the fluctuations in both horizons. 
+
+
+```{r ARUMA Rolling Window}
+roll.win.rmse.wge(un.df$Baggage, phi = arima.7.1.6.3.est$phi,theta = arima.7.1.6.3.est$theta, d = 1, s =6,horizon = 6)
+roll.win.rmse.wge(un.df$Baggage, phi = arima.7.1.6.3.est$phi,theta = arima.7.1.6.3.est$theta, d = 1, s =6,horizon = 12)
+```
+
++ The ASE of the ARUMA(7,1,s=6,3) model for the horizon of 6 month: 6,255,649
++ The ASE of the ARUMA(7,1,s=6,3) model for the horizon of 1 year:  10,117,560
+
+The ARUMA(7,1,s = 6, 3) model produce an RMSE of 7,840.407 for the six-month window and 13,323.326 for 1-year window. 
+
+# Model 3: Multivariate Model with Correlated Errors 
+```{r Split the data}
+# For the 6 month window 
+train78 = un.df[1:78,5:8]
+test78 = un.df[79:84,5:8]
+# for the 3 year window 
+train72 = un.df[1:72,5:8]
+test72= un.df[73:84,5:8]
+test72
+
+all_train = un.df[1:84,5:8]
+```
+We split the data to 2 training sets and two test sets to train and validate the resuls in two different windows: 6 months and a year. 
+
+## 6 month window
+```{r Short term- Fit the model}
+ksfit.6mon = lm(Baggage~ Scheduled + Cancelled + Enplaned , data = train78)
+ksfit.6mon$residuals
+phi = aic5.wge(ksfit.6mon$residuals, p = 0:5, q = 0:2)
+xreg = data.frame(Schedule =train78$Scheduled,Cancelled = train78$Cancelled, Enplaned = train78$Enplaned )
+fit.6mon = arima(train78$Baggage,order = c(2,0,0), xreg = xreg)
+AIC(fit.6mon)
+summary(fit.6mon)
+acf(fit.6mon$residuals)
+ljung.wge(fit.6mon$residuals, K = 48)
+```
+In our multivariate model with correlated errors among three variables, the number of scheduled flights was not significantly associated with mishandled baggage. This is expected, as scheduled flights don't directly indicate the actual number of passengers or the potential for baggage mishandling. Conversely, cancelled flights and the number of enplaned passengers showed significant correlations with mishandled baggage incidents. More cancelled flights often result in lost or delayed baggage, leading to increased complaints. Similarly, a higher number of enplaned passengers implies more baggage to manage, raising the likelihood of mishandling. This model effectively highlights the significant factors contributing to baggage issues.
+
+```{r 6month Forecast - Schedule}
+plotts.sample.wge(train78$Scheduled)
+# dif.1.sch = artrans.wge(train78$Scheduled, phi.tr = 1)
+dif.1.sch = train78$Scheduled
+pq.scheduled.6mon = aic.wge(dif.1.sch, p = 0:5, q = 0:2)
+scheduled.6mon.est = est.arma.wge(dif.1.sch, p = pq.scheduled.6mon$p, q= pq.scheduled.6mon$q)
+scheduled.6mon.preds = fore.arima.wge(train78$Scheduled,d =1,  phi = scheduled.6mon.est$phi, lastn = F, n.ahead = 6)
+
+```
+We suspect a nonstationary (1-B) in the schedule time series based on the slowly damping autocoreelations and the dominant peak at f = 0 in the spectral density esimate. 
+
+```{r 6month Forecast - Canceled}
+# Cancelled
+plotts.sample.wge(train78$Cancelled)
+# dif.can = artrans.wge(train78$Cancelled, phi.tr = c(0,0,0,0,0,1))
+dif.can = train78$Cancelled
+pq.6mon.Cancelled = aic.wge(dif.can, p=0:10, q = 0:2)
+Cancelled.6mon.est = est.arma.wge(dif.can, p = pq.6mon.Cancelled$p, q = pq.6mon.Cancelled$q)
+Cancelled.6mon.preds = fore.arima.wge(train78$Cancelled, s = 6,phi = Cancelled.6mon.est$phi, lastn = F, n.ahead = 6)
+```
+The canceled time series appear to be stationary. 
+
+```{r 6month Forecast - Enplanned }
+
+# Enplanned
+plotts.sample.wge(train78$Enplaned)
+dif.en = artrans.wge(train78$Enplaned, phi.tr = c(rep(0,11),1))
+pq.6mon.Enplaned=aic.wge(dif.en, p=0:10, q = 0:2)
+Enplaned.6mon.est = est.arma.wge(dif.en, p = pq.6mon.Enplaned$p, q = pq.6mon.Enplaned$q)
+Enplaned.6mon.preds = fore.arima.wge(train78$Enplaned, s= 12, phi = Enplaned.6mon.est$phi, lastn = F, n.ahead = 6)
+
+```
+The Enplaned appears to have a downward trend and cylic behavior associated with a period of 12. 
+
+```{r 6month Forecast - multivariate model}
+
+test_6mon.data = data.frame(scheduled.6mon.preds$f,Cancelled.6mon.preds$f, Enplaned.6mon.preds$f)
+#get predictions
+preds.6mon = predict(fit.6mon,newxreg = test_6mon.data)
+preds.ASE = mean((test78$Baggage - preds.6mon$pred)^2)
+preds.ASE #9370037
+preds.6mon$se
+
+preds.6mon$ulimit <- preds.6mon$pred + 1.96*4331.833
+preds.6mon$llimit<- preds.6mon$pred - 1.96*4331.833
+
+plot(seq(1,84,1), un.df$Baggage, type = "o",xlim = c(0,100),ylim = c(0,40000),  pch = 20,ylab = "Baggage", main = "Last 6 months Baggage Complaint Forecast")
+points(seq(79,84,1),  preds.6mon$pred, type = "o", pch = 1, col = "red")
+lines(seq(78,84,1), c(un.df$Baggage[84], preds.6mon$llimit), type = "l", col = "blue", lty = 2)
+lines(seq(78,84,1), c(un.df$Baggage[84], preds.6mon$ulimit), type = "l",  col = "blue", lty = 2)
+```
+While the forecasts over estimate the number of baggage complaints in the last 6 months, it is able to reflect the decreasing of the ishandled baggage in the fall (September - November) before getting back up in December. 
+
+
+
+
+## 12 month window 
+```{r Long term - Fit the model}
+ksfit.1yr = lm(Baggage~ Scheduled +  Cancelled +  Enplaned , data = train72)
+ksfit.1yr$residuals
+acf(ksfit.1yr$residuals, lag.max = 25)
+ljung.wge(ksfit.1yr$residuals, K = 48)
+phi = aic5.wge(ksfit.1yr$residuals, p = 0:5, q = 0:2)
+fit.1yr = arima(train72$Baggage,order = c(2,0,0), xreg = cbind(train72$Scheduled,train72$Cancelled, train72$Enplaned))
+AIC(fit.1yr)
+summary(fit.1yr)
+acf(fit.1yr$residuals)
+ljung.wge(fit.1yr$residuals, K = 48)
+```
+
+
+```{r Explanatory Variable Forecasts}
+# Scheduled 
+plotts.sample.wge(train72$Scheduled)
+dif.1.sch = artrans.wge(train72$Scheduled, phi.tr = 1)
+plotts.sample.wge(dif.1.sch)
+p.1yr.scheduled = aic.wge(dif.1.sch, p = 0:5, q = 0:2)
+p.1yr.scheduled$p 
+scheduled.1yr.est = est.arma.wge(dif.1.sch, p = p.1yr.scheduled$p, q= p.1yr.scheduled$q)
+scheduled.1yr.preds = fore.arima.wge(train72$Scheduled,d =1,  phi = scheduled.1yr.est$phi, lastn = F, n.ahead = 12)
+
+# Cancelled
+plotts.sample.wge(train72$Cancelled)
+dif6.can= artrans.wge(train72$Cancelled, phi.tr = c(rep(0,5),1))
+p.1yr.Cancelled = aic.wge(dif6.can, p=0:10, q = 0:0)
+p.1yr.Cancelled$p
+Cancelled.1yr.est = est.ar.wge(dif6.can, p = p.1yr.Cancelled$p)
+Cancelled.1yr.preds = fore.arima.wge(train72$Cancelled, s=6, phi = Cancelled.1yr.est$phi, lastn = , n.ahead = 12)
+
+# Enplanned
+plotts.sample.wge(train72$Enplaned)
+dif12.en = artrans.wge(train72$Enplaned, phi.tr = c(rep(0,11),1))
+p.1yr.Enplaned = aic.wge(dif12.en, p=0:10, q = 0:0)
+p.1yr.Enplaned$p 
+Enplaned.1yr.est = est.ar.wge(dif12.en, p = p.1yr.Enplaned$p)
+Enplaned.1yr.preds = fore.arima.wge(train72$Enplaned, s = 12, phi = Enplaned.1yr.est$phi, lastn = F, n.ahead = 12)
+
+```
+
+```{r 1 year forecast - multivariate model}
+
+test_1yr.data = data.frame( scheduled.1yr.preds$f,Cancelled.1yr.preds$f, Enplaned.1yr.preds$f)
+#get predictions
+preds.1yr = predict(fit.1yr,newxreg = test_1yr.data)
+
+preds.1yrASE = mean((test72$Baggage - preds.1yr$pred)^2)
+preds.1yrASE #61658440
+
+preds.1yr$se
+preds.1yr$ulimit <- preds.1yr$pred + 1.96*4452.097
+preds.1yr$llimit<- preds.1yr$pred - 1.96*4452.097
+plot(seq(1,84,1), un.df$Baggage, type = "o",xlim = c(0,100), ylim = c(0,40000),pch = 20,ylab = "Baggage", main = "Last 12 months Baggage Complaint Forecast")
+points(seq(73,84,1),  preds.1yr$pred, type = "o", pch = 1, col = "red")
+lines(seq(72,84,1), c(un.df$Baggage[84], preds.1yr$llimit), type = "l", col = "blue", lty = 2)
+lines(seq(72,84,1), c(un.df$Baggage[84], preds.1yr$ulimit), type = "l",  col = "blue", lty = 2)
+```
+The long term orecasts are not as useful as the short term. As discussed earlier, the amount of baggage complaints peak in the December and Jun of each year, but the forecasts estimate the July has the highest Also, even when the complaints in the increased in March they are not often as high as the December of the previous year. We decided that the MLE with the correlated errors are not useful in the long term window. 
+
+```{r MUltivariavate - 6 month Final forecasts}
+
+scheduled.f6mon.preds = fore.arima.wge(all_train$Scheduled,d =1,  phi = scheduled.6mon.est$phi, lastn = F, n.ahead = 6)
+Cancelled.f6mon.preds = fore.arima.wge(all_train$Cancelled, s=6, phi = Cancelled.6mon.est$phi, lastn = F, n.ahead = 6)
+Enplaned.f6mon.preds = fore.arima.wge(all_train$Enplaned, s = 12, phi = Enplaned.6mon.est$phi, lastn = F, n.ahead = 6)
+
+# Train the entire dataset 
+f6mon.fit = arima(all_train$Baggage,order = c(2,0,0), xreg = cbind(all_train$Cancelled, all_train$Scheduled, all_train$Enplaned))
+f6mon.forecast.df = data.frame(Cancelled.f6mon.preds$f, scheduled.f6mon.preds$f, Enplaned.f6mon.preds$f)
+#get predictions
+f6mon.preds = predict(f6mon.fit,newxreg = f6mon.forecast.df)
+
+f6mon.preds$ulimit <- f6mon.preds$pred + 1.96*4209.019
+f6mon.preds$llimit<- f6mon.preds$pred - 1.96*4209.019
+
+# Plot the forecast 
+plot(seq(1,84,1), un.df$Baggage, type = "l",xlim = c(0,100), ylim = c(0, 40000),pch = 20,ylab = "Baggage", main = "Next 6 months Baggage Complaint Forecast")
+points(seq(85,90,1),  f6mon.preds$pred, type = "o", pch = 1, col = "red")
+# Adding the limits 
+lines(seq(85, 90, 1), f6mon.preds$llimit, type = "l", pch = 1, col = "blue", lty = 2)
+lines(seq(85, 90, 1), f6mon.preds$ulimit, type = "l", pch = 1, col = "blue", lty = 2)
+
+# Adding a legend, if necessary, to clarify the plot elements
+legend("topright", legend = c("Observed", "Forecast", "Confidence Interval"), 
+       col = c("black", "red", "blue"), lty = 1, pch = c(NA, 1, 1), cex = 0.8)
+
+```
+
+
+```{r Multivariate - 12 month Final forecast}
+
+scheduled.f1yr.preds = fore.arima.wge(all_train$Scheduled,d =1,  phi = scheduled.1yr.est$phi, lastn = F, n.ahead = 12)
+Cancelled.f1yr.preds = fore.arima.wge(all_train$Cancelled, s=6, phi = Cancelled.1yr.est$phi, lastn = F, n.ahead = 12)
+Enplaned.f1yr.preds = fore.arima.wge(all_train$Enplaned, s = 12, phi = Enplaned.1yr.est$phi, lastn = F, n.ahead = 12)
+
+# Train the entire dataset 
+f1yr.fit = arima(all_train$Baggage,order = c(2,0,0), xreg = cbind(all_train$Cancelled, all_train$Scheduled, all_train$Enplaned))
+f1yr.forecast.df = data.frame(Cancelled.f1yr.preds$f, scheduled.f1yr.preds$f, Enplaned.f1yr.preds$f)
+#get predictions
+f1yr.preds = predict(f1yr.fit,newxreg = f1yr.forecast.df)
+
+f1yr.preds$ulimit <- f1yr.preds$pred + 1.96*4209.019
+f1yr.preds$llimit<- f1yr.preds$pred - 1.96*4209.019
+
+# Plot the forecast 
+plot(seq(1,84,1), un.df$Baggage, type = "l",xlim = c(0,120), ylim = c(0, 40000), pch = 20,ylab = "Baggage", main = "Next 12 months Baggage Complaint Forecast")
+points(seq(85,96,1),  f1yr.preds$pred, type = "o", pch = 1, col = "red")
+# Adding lower limit as a blue line
+lines(seq(85, 96, 1), f1yr.preds$llimit, type = "l", pch = 1, col = "blue", lty = 2)
+
+lines(seq(85, 96, 1), f1yr.preds$ulimit, type = "l", pch = 1, col = "blue", lty = 2)
+
+# Adding a legend, if necessary, to clarify the plot elements
+legend("topright", legend = c("Observed", "Forecast", "Confidence Interval"), 
+       col = c("black", "red" ,"blue"), lty = 1, pch = c(NA, 1, 1), cex = 0.8)
+
+```
+
+
+# VAR models 
+## 6 month window
+```{r VARselect - With seasonality}
+library(vars)
+VARselect(un.df$Baggage, season = 6, lag.max = 20, type = "both")
+```
+
+It selects the AR(7) using the BIC.  
+
+```{r VAR7 - with seasonality }
+VAR7.6mon.season = VAR(train78, type = "both", p = 7, season = 6)
+summary(VAR7.6mon.season)
+acf(VAR7.6mon.season$varresult$Baggage$residuals)
+ljung.wge(VAR7.6mon.season$varresult$Baggage$residuals, p = 10, K = 24)
+ljung.wge(VAR7.6mon.season$varresult$Baggage$residuals, p = 10, K = 48)
+```
+One advantage of VAR that MLR with correlated errors fail to do is addressing the correlations between the predictors. It appears that the schedule flights and the passengers volume in those flights are correlated. Therefore, VAR helps improving the forecasts of these predictors, and thus, enhanced the forecasts accuracy of the baggage complaints. 
+
+```{r 6 month forecasts - with seasonality}
+VAR7.6mon.season.preds = predict(VAR7.6mon.season, n.ahead = 6)
+
+# ASE
+VAR7.6mon.season.ASE = mean((VAR7.6mon.season.preds$fcst$Baggage[,1] - test78[,"Baggage"])^2)
+VAR7.6mon.season.ASE #10,193,188
+
+
+# Plot 
+ 
+plot(seq(1,84,1), un.df$Baggage, type = "o",xlim = c(0,100), ylim = c(0, 40000),pch = 20,ylab = "Baggage", main = "Last 6 months Baggage Complaint Forecast")
+points(seq(79,84,1),  VAR7.6mon.season.preds$fcst$Baggage[,1], type = "o", pch = 1, col = "red")
+
+# Adding lower limit of the VAR9
+lines(seq(79, 84, 1), VAR7.6mon.season.preds$fcst$Baggage[,2], type = "l", pch = 1, col = "blue", lty = 2)
+lines(seq(79, 84, 1), VAR7.6mon.season.preds$fcst$Baggage[,3], type = "l", pch = 1, col = "blue", lty = 2)
+
+# Adding a legend, if necessary, to clarify the plot elements
+legend("topright", legend = c("Observed", "Forecast", "Confidence Interval"), 
+       col = c("black", "red", "blue"), lty = 1, pch = c(NA, 1, 1), cex = 0.5)
+```
+The ASE of the VAR(7) with seasonality outperforms the MLR with correlated errors for the short term forecasts. 
+
+# 1 year window  
+```{r 1 year forecasts - VAR7 with seasonality}
+VAR7.1yr.season = VAR(train72, type = "both", p = 7, season = 6)
+acf(VAR7.1yr.season$varresult$Baggage$residuals)
+ljung.wge(VAR7.1yr.season$varresult$Baggage$residuals, p = 10, K = 24)
+ljung.wge(VAR7.1yr.season$varresult$Baggage$residuals, p = 10, K = 48)
+
+VAR7.1yr.season.preds = predict(VAR7.1yr.season, n.ahead = 12)
+
+# ASE
+VAR7.1yr.season.ASE = mean((VAR7.1yr.season.preds$fcst$Baggage[,1] - test72[,"Baggage"])^2)
+VAR7.1yr.season.ASE # 22,802,878
+
+
+# Plot 
+ 
+plot(seq(1,84,1), un.df$Baggage, type = "o",xlim = c(0,100), ylim = c(0, 40000),pch = 20,ylab = "Baggage", main = "Last 6 months Baggage Complaint Forecast")
+points(seq(73,84,1),  VAR7.1yr.season.preds$fcst$Baggage[,1], type = "o", pch = 1, col = "red")
+
+# Adding lower limit of the VAR9
+lines(seq(73, 84, 1), VAR7.1yr.season.preds$fcst$Baggage[,2], type = "l", pch = 1, col = "blue", lty = 2)
+lines(seq(73, 84, 1), VAR7.1yr.season.preds$fcst$Baggage[,3], type = "l", pch = 1, col = "blue", lty = 2)
+
+# Adding a legend, if necessary, to clarify the plot elements
+legend("topright", legend = c("Observed", "Forecast", "Confidence Interval"), 
+       col = c("black", "red", "blue"), lty = 1, pch = c(NA, 1, 1), cex = 0.5)
+```
+The ASE of the VAR(7) with seasonality also outperform the MLR with corraleted errors for the long term forecasts. 
+
+
+## Future Forecasts
+```{r VAR Future Forecast - Next 6month}
+VAR7.f6mon.season = VAR(all_train, type = "both", p = 7, season = 6)
+acf(VAR7.f6mon.season$varresult$Baggage$residuals)
+ljung.wge(VAR7.f6mon.season$varresult$Baggage$residuals, p = 10, K = 24)
+ljung.wge(VAR7.f6mon.season$varresult$Baggage$residuals, p = 10, K = 48)
+
+VAR7.f6mon.preds = predict(VAR7.f6mon.season, n.ahead = 6)
+
+# Plot 
+ 
+plot(seq(1,84,1), un.df$Baggage, type = "l",xlim = c(0,100), ylim = c(0, 40000),pch = 20,ylab = "Baggage", main = "Last 6 months Baggage Complaint Forecast")
+points(seq(85,90,1),  VAR7.f6mon.preds$fcst$Baggage[,1], type = "o", pch = 1, col = "red")
+
+# Adding lower limit of the VAR9
+lines(seq(85, 90, 1), VAR7.f6mon.preds$fcst$Baggage[,2], type = "l", pch = 1, col = "blue", lty = 2)
+lines(seq(85, 90, 1), VAR7.f6mon.preds$fcst$Baggage[,3], type = "l", pch = 1, col = "blue", lty = 2)
+
+# Adding a legend, if necessary, to clarify the plot elements
+legend("topright", legend = c("Observed", "Forecast", "Confidence Interval"), 
+       col = c("black", "red", "blue"), lty = 1, pch = c(NA, 1, 1), cex = 0.5)
+```
+
+
+```{r VAR Future Forecast - Next year}
+VAR7.f1yr.season = VAR(all_train, type = "both", p = 7, season = 6)
+acf(VAR7.f1yr.season$varresult$Baggage$residuals)
+ljung.wge(VAR7.f1yr.season$varresult$Baggage$residuals, p = 10, K = 24)
+ljung.wge(VAR7.f1yr.season$varresult$Baggage$residuals, p = 10, K = 48)
+
+VAR7.f1yr.preds = predict(VAR7.f1yr.season, n.ahead = 12)
+summary(VAR7.f1yr.season)
+# Plot 
+ 
+plot(seq(1,84,1), un.df$Baggage, type = "l",xlim = c(0,100), ylim = c(0, 40000),pch = 20,ylab = "Baggage", main = "Last 6 months Baggage Complaint Forecast")
+points(seq(85,96,1),  VAR7.f1yr.preds$fcst$Baggage[,1], type = "o", pch = 1, col = "red")
+
+# Adding lower limit of the VAR9
+lines(seq(85, 96, 1), VAR7.f1yr.preds$fcst$Baggage[,2], type = "l", pch = 1, col = "blue", lty = 2)
+lines(seq(85, 96, 1), VAR7.f1yr.preds$fcst$Baggage[,3], type = "l", pch = 1, col = "blue", lty = 2)
+
+# Adding a legend, if necessary, to clarify the plot elements
+legend("topright", legend = c("Observed", "Forecast", "Confidence Interval"), 
+       col = c("black", "red", "blue"), lty = 1, pch = c(NA, 1, 1), cex = 0.5)
+```
+
+
+
+
+# Model 4: MLP  
+Another multivariate model is multilayer perceptrons (MLP) using the neural network. MLP is a non-linear model which possibly indlude hidden layers and a variety of activation functions. One of the advantages of the neural network model is that it could address the non linear relationship between the variables, which the other linear models are not able to. 
+
+## Short term window 
+```{r Schedule forecast}
+
+library(nnfor)
+set.seed(1)
+fit.mlp.sch.6mon = mlp(ts(train78[,"Scheduled"]), reps = 50, difforder = 1, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.sch.6mon
+plot(fit.mlp.sch.6mon)
+fore.mlp.sch.6mon = forecast(fit.mlp.sch.6mon, h = 6)
+plot(fore.mlp.sch.6mon)
+```
+We will build three MLP models to try to predict the canceled, scheduled, and enplanned to forecast thebagge claims later on. 
+
+```{r cancelled}
+set.seed(1)
+fit.mlp.can.6mon = mlp(ts(train78[,"Cancelled"]),difforder = 0, reps = 50, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.can.6mon
+plot(fit.mlp.can.6mon)
+fore.mlp.can.6mon = forecast(fit.mlp.can.6mon, h = 6)
+plot(fore.mlp.can.6mon)
+```
+We let the MLP model to pick up the lags for the schedule. Another advantage of MLp is that it could selft selects the best lag and feature to enhance the forecast accuracy. 
+
+```{r Enplanned}
+set.seed(1)
+fit.mlp.enpl.6mon = mlp(ts(train78[,"Enplaned"]), difforder = 0, reps = 50, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.enpl.6mon
+plot(fit.mlp.enpl.6mon)
+fore.mlp.enpl.6mon = forecast(fit.mlp.enpl.6mon, h = 6)
+plot(fore.mlp.enpl.6mon)
+```
+
+
+
+```{r 6 month - Fit the MLP model }
+set.seed(1234)
+xreg_78df = data.frame(Scheduled = ts(train78[,"Scheduled"]), Cancelled = ts(train78[,"Cancelled"]),
+                     Enplaned =ts(train78[,"Enplaned"]))
+
+xreg_78df
+fit.mlp.bag.6mon = mlp(ts(train78$Baggage, frequency = 6), comb = "median", reps = 50, difforder = 1, sel.lag = F, allow.det.season = T, det.type = "bin", hd = 5, xreg = xreg_78df)
+fit.mlp.bag.6mon
+plot(fit.mlp.bag.6mon)
+```
+If we let the MLP model select the lag, the canceled variable will be drop from the model, which we found interesting as we know from the multivariate model with correlated errors and our domain knowldge of air travels, canceled fight is significant to the number of mishandled baggage. 
+
+```{r 6 month forecasts}
+
+fore.6mon.df = data.frame(Scheduled = ts(c(train78[,"Scheduled"], fore.mlp.sch.6mon$mean)), Canceled = ts( c(train78[,"Cancelled"], fore.mlp.can.6mon$mean )), Enplaned = ts(c(train78[,"Enplaned"], fore.mlp.enpl.6mon$mean)))
+
+fore.mlp.bag.6mon = forecast(fit.mlp.bag.6mon, xreg = fore.6mon.df, h = 6)
+plot(fore.mlp.bag.6mon)
+MLP.6mon.ASE = mean((fore.mlp.bag.6mon$mean - test78$Baggage)^2)
+MLP.6mon.ASE
+
+fore.mlp.bag.6mon$mean
+plot(seq(1,84,1), un.df$Baggage, type = "o", ylim = c(0,40000) )
+points(seq(79, 84,1),fore.mlp.bag.6mon$mean,type = "o",col = "red", lwd = 2)
+```
+Except the unexpected high volume of the baggage complaints in March, which is often not as high as the January, tge forecasts did a good job forecasts the fluctuations of the baggage complaints. 
+
+
+## Long term forecast 
+```{r MLP variable forecasts}
+set.seed(1)
+fit.mlp.sch.1yr = mlp(ts(train72[,"Scheduled"]), reps = 50, difforder = 1, comb = "median", allow.det.season = F, det.type = "bin")
+fit.mlp.sch.1yr
+plot(fit.mlp.sch.1yr)
+fore.mlp.sch.1yr = forecast(fit.mlp.sch.1yr, h = 12)
+plot(fore.mlp.sch.1yr)
+
+set.seed(1)
+fit.mlp.can.1yr = mlp(ts(train72[,"Cancelled"]), reps = 50,  comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.can.1yr
+plot(fit.mlp.can.1yr)
+fore.mlp.can.1yr = forecast(fit.mlp.can.1yr, h = 12)
+plot(fore.mlp.can.1yr)
+
+set.seed(1)
+fit.mlp.enpl.1yr = mlp(ts(train72[,"Enplaned"]), reps = 50, difforder = 0, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.enpl.1yr
+plot(fit.mlp.enpl.1yr)
+fore.mlp.enpl.1yr = forecast(fit.mlp.enpl.1yr, h = 12)
+plot(fore.mlp.enpl.1yr)
+```
+
+
+```{r 1 yr- Fit the MLP model}
+set.seed(1234)
+xreg_72df = data.frame(Scheduled = ts(train72[,"Scheduled"]), Cancelled = ts(train72[,"Cancelled"]), Enplaned = ts(train72[,"Enplaned"]))
+
+fit.mlp.bag.1yr = mlp(ts(train72$Baggage, frequency = 6), comb = "median", reps = 50, sel.lag = F, allow.det.season = T, det.type = "bin", hd = 5, xreg = xreg_72df)
+fit.mlp.bag.1yr
+plot(fit.mlp.bag.1yr)
+```
+
+
+```{r 1 yr forecasts}
+fore_72df = data.frame(Scheduled = ts(c(train72[,"Scheduled"], fore.mlp.sch.1yr$mean)),Canceled = ts( c(train72[,"Cancelled"], fore.mlp.can.1yr$mean )),  Enplaned = ts(c(train72[,"Enplaned"], fore.mlp.enpl.1yr$mean)))
+
+fore.mlp.bag.1yr = forecast(fit.mlp.bag.1yr, xreg = fore_72df, h = 12)
+plot(fore.mlp.bag.1yr)
+Mlp.bag.1yr.ASE = mean((fore.mlp.bag.1yr$mean - test72$Baggage)^2)
+Mlp.bag.1yr.ASE 
+
+plot(seq(1,84,1), un.df$Baggage, type = "o", ylim =c(0,40000))
+points(seq(73, 84,1),fore.mlp.bag.1yr$mean,type = "o",col = "red", lwd = 2)
+```
+The forecasts did poorly toward the end of the window, if it did a great job forecasting the first 6 months, the baggagke complaints in Ausgust are some how underestimated than what it actually is.
+
+
+```{r MLP final forecasts - 6 months}
+#Foreccasts the scheduled 
+set.seed(1)
+fit.mlp.sch.f6mon = mlp(ts(all_train[,"Scheduled"]), reps = 50, difforder = 1, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.sch.f6mon
+plot(fit.mlp.sch.f6mon)
+fore.mlp.sch.f6mon = forecast(fit.mlp.sch.f6mon, h = 6)
+plot(fore.mlp.sch.f6mon)
+#Foreccasts the canceled
+set.seed(1)
+fit.mlp.can.f6mon = mlp(ts(all_train[,"Cancelled"]), reps = 50,  comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.can.f6mon
+plot(fit.mlp.can.f6mon)
+fore.mlp.can.f6mon = forecast(fit.mlp.can.f6mon, h = 6)
+plot(fore.mlp.can.f6mon)
+#Foreccasts the enplaned 
+set.seed(1)
+fit.mlp.enpl.f6mon = mlp(ts(all_train[,"Enplaned"]), reps = 50, difforder = 0, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.enpl.f6mon
+plot(fit.mlp.enpl.f6mon)
+fore.mlp.enpl.f6mon = forecast(fit.mlp.enpl.f6mon, h = 6)
+plot(fore.mlp.enpl.f6mon)
+
+set.seed(1234)
+# Fit the MLP for the final forecasts 
+xreg_84df = data.frame(Scheduled = ts(all_train[,"Scheduled"]), Cancelled = ts(all_train[,"Cancelled"]), Enplaned = ts(all_train[,"Enplaned"]))
+
+fit.mlp.bag.f6mon = mlp(ts(all_train$Baggage, frequency = 6), comb = "median", reps = 50, sel.lag = F, allow.det.season = T, det.type = "bin", hd = 5, xreg = xreg_84df)
+fit.mlp.bag.f6mon
+plot(fit.mlp.bag.f6mon)
+```
+
+
+```{r MLP Final forecasts- 6 months}
+fore_84df = data.frame(Scheduled = ts(c(all_train[,"Scheduled"], fore.mlp.sch.f6mon$mean)),Canceled = ts( c(all_train[,"Cancelled"], fore.mlp.can.f6mon$mean )),  Enplaned = ts(c(all_train[,"Enplaned"], fore.mlp.enpl.f6mon$mean)))
+
+fore.mlp.bag.f6mon = forecast(fit.mlp.bag.f6mon, xreg = fore_84df, h = 6)
+plot(fore.mlp.bag.f6mon)
+
+plot(seq(1,84,1), un.df$Baggage, type = "o", ylim =c(0,40000), xlim = c(0,90))
+points(seq(85, 90,1),fore.mlp.bag.f6mon$mean,type = "o",col = "red", lwd = 2)
+```
+
+
+```{r MLP final forecasts - 1yr}
+#Foreccasts the scheduled 
+set.seed(1)
+fit.mlp.sch.f1yr = mlp(ts(all_train[,"Scheduled"]), reps = 50, difforder = 1, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.sch.1yr
+plot(fit.mlp.sch.1yr)
+fore.mlp.sch.1yr = forecast(fit.mlp.sch.1yr, h = 12)
+plot(fore.mlp.sch.1yr)
+#Foreccasts the canceled
+set.seed(1)
+fit.mlp.can.1yr = mlp(ts(all_train[,"Cancelled"]), reps = 50,  comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.can.1yr
+plot(fit.mlp.can.1yr)
+fore.mlp.can.1yr = forecast(fit.mlp.can.1yr, h = 12)
+plot(fore.mlp.can.1yr)
+#Foreccasts the enplaned 
+set.seed(1)
+fit.mlp.enpl.1yr = mlp(ts(all_train[,"Enplaned"]), reps = 50, difforder = 0, comb = "median", allow.det.season = T, det.type = "bin")
+fit.mlp.enpl.1yr
+plot(fit.mlp.enpl.1yr)
+fore.mlp.enpl.1yr = forecast(fit.mlp.enpl.1yr, h = 12)
+plot(fore.mlp.enpl.1yr)
+
+# Fit the MLP for the final forecasts 
+set.seed(1234)
+xreg_84df = data.frame(Scheduled = ts(all_train[,"Scheduled"]), Cancelled = ts(all_train[,"Cancelled"]), Enplaned = ts(all_train[,"Enplaned"]))
+
+fit.mlp.bag.1yr = mlp(ts(all_train$Baggage, frequency = 6), comb = "median", reps = 50, sel.lag = F, allow.det.season = T, det.type = "bin", hd = 5, xreg = xreg_84df)
+fit.mlp.bag.1yr
+plot(fit.mlp.bag.1yr)
+```
+
+```{r MLP Final forecasts- 1 year}
+fore_84df = data.frame(Scheduled = ts(c(all_train[,"Scheduled"], fore.mlp.sch.1yr$mean)),Canceled = ts( c(all_train[,"Cancelled"], fore.mlp.can.1yr$mean )),  Enplaned = ts(c(all_train[,"Enplaned"], fore.mlp.enpl.1yr$mean)))
+
+fore.mlp.bag.1yr = forecast(fit.mlp.bag.1yr, xreg = fore_84df, h = 12)
+plot(fore.mlp.bag.f6mon)
+
+plot(seq(1,84,1), un.df$Baggage, type = "o", ylim =c(0,40000), xlim = c(0,100))
+points(seq(85, 96,1),fore.mlp.bag.1yr$mean,type = "o",col = "red", lwd = 2)
+```
+
+
+
+#Model 5:  Ensemble Model 
+```{r Model Comparison}
+preds.6mon$pred
+plot(seq(1,84,1), un.df$Baggage, type = "l", lwd =2, xlim = c(78, 85), ylim = c(0, 40000))
+lines(seq(79, 84,1),arima8.1.1.6mon.fore$f,type = "l",col = "orange", lwd = 2)
+lines(seq(79, 84,1),arima.7.1.6.3.6mon.fore$f,type = "l",col = "blue", lwd = 2)
+lines(seq(79, 84,1),preds.6mon$pred,type = "l",col = "green", lwd = 2)
+lines(seq(79, 84,1),VAR7.6mon.season.preds$fcst$Baggage[,1],type = "l",col = "purple", lwd = 2)
+# lines(seq(79, 84,1),VAR7.6mon.season.preds$fcst$Baggage[,1],type = "l",col = "orange", lwd = 2)
+lines(seq(79, 84,1),fore.mlp.bag.6mon$mean,type = "l",col = "red", lwd = 2)
+
+# Adding a legend
+legend("topright", legend = c("Observed", "ARIMA", "ARUMA", "Multivariate with Correlated Errors", "VAR" ,"MLP"), 
+       col = c("black","orange", "blue", "purple", "green", "red"), lty = 1, pch = c(NA, 1, 1), cex = 0.8)
+```
+We will build an ensemble model from the ARIMA and ARUMA models as one tends to have underestimating foreasts while the other has the overestimate forecasts. 
+
+# Ensemble
+```{r 6 mon Forecasts}
+ensemble.6mon = ( arima.7.1.6.3.6mon.fore$f+ arima8.1.1.6mon.fore$f)/2
+ensemble.6mon
+# Plot 
+plot(seq(1,84,1), un.df$Baggage, type = "l", lwd =2, xlim = c(75, 85), ylim = c(0, 40000))
+lines(seq(79, 84,1),fore.mlp.bag.6mon$mean,type = "l",col = "red", lwd = 3)
+lines(seq(79, 84,1),ensemble.6mon,type = "l",col = "blue", lwd = 4,  lty = 2)
+# Ensemble ASE 
+ensemble.6mon.ASE = mean((test78$Baggage - ensemble.6mon)^2 )
+ensemble.6mon.ASE
+
+# Adding a legend
+legend("topright", legend = c("Observed","ensemble", "MLP"), 
+       col = c("black" ,"blue","red"), lty = 1, pch = c(NA, 1, 1), cex = 0.8)
+```
+It is hard to say the ensemble outperform the MLP in this window as they both did a good job forecasting the fluctuations in the  number of baggage complaints
+
+
+```{r 1 year forecasts}
+ensemble.1yr = (arima.7.1.6.3.1yr.fore$f+ arima8.1.1.1yr.fore$f)/2
+ensemble.1yr
+
+# Plot 
+plot(seq(1,84,1), un.df$Baggage, type = "l", lwd =2, xlim = c(70, 85), ylim = c(0, 40000))
+lines(seq(73, 84,1),fore.mlp.bag.1yr$mean,type = "l",col = "red", lwd = 3)
+lines(seq(73, 84,1),ensemble.1yr,type = "l",col = "blue", lwd = 4,  lty = 2)
+# Ensemble ASE 
+ensemble.1yr.ASE = mean((test78$Baggage - ensemble.1yr)^2 )
+ensemble.1yr.ASE
+
+# Adding a legend
+legend("topright", legend = c("Observed","ensemble", "MLP"), 
+       col = c("black" ,"blue","red"), lty = 1, pch = c(NA, 1, 1), cex = 0.8)
+```
+As mentioned above, the MLP tends to be too optimistic in forecasts the baggage complaint in the long tem window as the number of the baggage complaints keep increasing, evem at its peak in December is not as high as the previous month of Jun. The ensemble model, however, able to mirror the trends in the data. 
+
+# Final Forecasts
+```{r ARIMA - Final forecast }
+# Short term = 6 months
+arima8.1.1.f6mon = fore.arima.wge(un.df$Baggage, phi = arima8.1.1$phi, theta = arima8.1.1$theta, n.ahead = 6, lastn = F, limits = T)
+# Long term = a year
+arima8.1.1.f1yr = fore.arima.wge(un.df$Baggage, phi = arima8.1.1$phi, theta = arima8.1.1$theta, n.ahead = 12, lastn = F, limits = T)
+
+```
+The ensemble model did a good job balance the optimistic forecasts of the ARIMA model and the permistice ofrecasts of the ARUMA model. With this model, we are anticipating a peak in January and a smaller peak in the summer, then drop in the fall and then getting back up in Deccember, 
+
+```{r ARUMA - Final forecast }
+# Short term = 6 months
+arima.7.1.6.3.f6mon = fore.aruma.wge(un.df$Baggage, phi = arima.7.1.6.3.est$phi,theta = arima.7.1.6.3.est$theta, d = 1, s =6, n.ahead = 6, lastn = F, limits = T)
+# Long term = a year
+arima.7.1.6.3.f1yr= fore.aruma.wge(un.df$Baggage, phi = arima.7.1.6.3.est$phi,theta = arima.7.1.6.3.est$theta, d = 1, s =6, n.ahead = 12, lastn = F, limits = T)
+
+```
+
+```{r Ensemble Final forecast}
+#  Next 6 months
+ensemble.f6mon = (arima.7.1.6.3.f6mon$f + arima8.1.1.f6mon$f)/2
+ensemble.f6mon
+
+
+ensemble.f6mon.llmit = (arima.7.1.6.3.f6mon$ll + arima8.1.1.f6mon$ll)/2
+ensemble.f6mon.ulimit = (arima.7.1.6.3.f6mon$ul + arima8.1.1.f6mon$ul)/2
+ensemble.f6mon.llmit 
+# Plot 
+plot(seq(1,84,1), un.df$Baggage, type = "o", lwd =2, xlim = c(0, 100), ylim = c(-10000, 40000))
+# lines(seq(85, 90,1),fore.mlp.f6mon$mean,type = "l",col = "red", lwd = 2)
+points(seq(84, 90,1),c(un.df$Baggage[84],ensemble.f6mon),type = "o",col = "red", lwd = 2)
+lines (seq(84, 90,1),c(un.df$Baggage[84],ensemble.f6mon.llmit),type = "l",col = "blue", lwd = 1, lty = 3)
+lines(seq(84, 90,1),c(un.df$Baggage[84],ensemble.f6mon.ulimit),type = "l",col = "blue", lwd = 1, lty = 3)
+
+
+# Next year 
+ensemble.f1yr = (arima.7.1.6.3.f1yr$f + arima8.1.1.f1yr$f)/2
+ensemble.f1yr.llmit = (arima.7.1.6.3.f1yr$ll + arima8.1.1.f1yr$ll)/2
+ensemble.f1yr.ulimit = (arima.7.1.6.3.f1yr$ul + arima8.1.1.f1yr$ul)/2
+
+
+# Plot 
+plot(seq(1,84,1), un.df$Baggage, type = "o", lwd =2, xlim = c(0,100), ylim = c(-10000, 40000))
+points(seq(84, 96,1),c(un.df$Baggage[84],fore.mlp.bag.1yr$mean),type = "o",col = "red", lwd = 2)
+lines (seq(84, 96,1),c(un.df$Baggage[84],ensemble.f1yr.llmit),type = "l",col = "blue", lwd = 1, lty = 3)
+lines(seq(84, 96,1),c(un.df$Baggage[84],ensemble.f1yr.ulimit),type = "l",col = "blue", lwd = 1, lty = 3)
+```
+
+
